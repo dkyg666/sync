@@ -2,101 +2,123 @@ name: Sync Upstream Releases
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # 每小时运行一次
   workflow_dispatch:
     inputs:
       repositories:
-        description: 'AlistGo/alist'
+        description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
         required: false
 
 jobs:
   sync-releases:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 允许提交代码
+    env:
+      TARGET_REPO: "dkyg666/sync"  # 目标仓库
+
     steps:
-      - name: Checkout current repository
+      # 步骤1: 检出当前仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup dependencies
+      # 步骤2: 安装依赖
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl
-          sudo mkdir -p /usr/share/keyrings/
+          sudo apt-get install -y curl jq
+          # 修复密钥目录权限
+          sudo mkdir -p /usr/share/keyrings
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt update
           sudo apt install -y gh
 
+      # 步骤3: 确定同步仓库列表
       - name: Determine repositories
         id: set-repos
         run: |
+          # 优先级: 手动输入 > 环境变量 > 默认值
           if [ -n "${{ github.event.inputs.repositories }}" ]; then
-            REPOSITORIES="${{ github.event.inputs.repositories}}"
+            REPOSITORIES="${{ github.event.inputs.repositories }}"
           elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
             REPOSITORIES="${{ vars.UPSTREAM_REPOSITORIES }}"
           else
-            echo "No repositories specified!"
-            exit 1
+            REPOSITORIES="AlistGo/alist"  # 默认同步仓库
           fi
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
+      # 步骤4: 执行同步操作
       - name: Process repositories
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}  # 专用 Token
+          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}  # 需目标仓库写入权限的Token
         run: |
+          set -euo pipefail  # 启用严格错误检查
+
           mkdir -p sync-history
-          echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n' | while read -r repo; do
-            export GH_TOKEN=$GH_TOKEN  # 确保循环内生效
-            owner=$(echo "$repo" | cut -d/ -f1)
-            repo_name=$(echo "$repo" | cut -d/ -f2)
+          echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n' | while read -r upstream_repo; do
+            # 解析仓库信息
+            owner=$(cut -d/ -f1 <<< "$upstream_repo")
+            repo_name=$(cut -d/ -f2 <<< "$upstream_repo")
             history_file="sync-history/${owner}_${repo_name}.txt"
 
-            echo "Checking $repo..."
+            echo "🔍 检查仓库: $upstream_repo"
 
-            # 获取最新 release
+            # 获取最新Release信息 (单行curl命令避免换行问题)
             response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \  # 使用专用 Token
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/$repo/releases/latest")
+              "https://api.github.com/repos/$upstream_repo/releases/latest")
 
-            tag_name=$(echo "$response" | jq -r '.tag_name')
-            if [ "$tag_name" = "null" ]; then
-              echo "No releases found"
+            tag_name=$(jq -r '.tag_name' <<< "$response")
+            if [[ "$tag_name" == "null" || -z "$tag_name" ]]; then
+              echo "⚠️ 未找到有效Release: $upstream_repo"
               continue
             fi
 
-            # 检查是否需要同步
+            # 检查是否已同步
             last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
-            if [ "$tag_name" = "$last_synced" ]; then
-              echo "Already synced $tag_name"
+            if [[ "$tag_name" == "$last_synced" ]]; then
+              echo "✅ 已同步最新版本: $tag_name"
               continue
             fi
+
+            echo "🔄 发现新版本: $tag_name"
 
             # 下载源码
-            zip_url=$(echo "$response" | jq -r '.zipball_url')
+            zip_url=$(jq -r '.zipball_url' <<< "$response")
             wget -q -O "${repo_name}-${tag_name}.zip" "$zip_url"
 
-            # 创建 release（需 GH_TOKEN 有目标仓库权限）
-            gh release create "sync/$repo_name/$tag_name" "${repo_name}-${tag_name}.zip" \
-              --title "Synced from $repo - $tag_name" \
-              --notes "Automatically synced from upstream repository" \
-              --repo dkyg666/sync  # 目标仓库
+            # 创建Release (显式传递Token)
+            echo "⬆️ 上传到目标仓库: $env:TARGET_REPO"
+            gh release create "sync/$repo_name/$tag_name" \
+              "${repo_name}-${tag_name}.zip" \
+              --title "Synced from $upstream_repo - $tag_name" \
+              --notes "Automatically synced from upstream" \
+              --repo "$env:TARGET_REPO" \
+              <<< "$GH_TOKEN"  # 避免交互提示
 
             # 记录同步状态
             echo "$tag_name" > "$history_file"
             rm -f "${repo_name}-${tag_name}.zip"
           done
 
-      - name: Commit sync records
+      # 步骤5: 提交同步记录
+      - name: Commit sync history
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 当前仓库的Token
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add sync-history
-          if git commit -m "Update sync records"; then
+          
+          # 仅当有变更时提交
+          if git add sync-history && [ -n "$(git status --porcelain)" ]; then
+            git commit -m "📚 更新同步记录: ${{ steps.set-repos.outputs.REPOSITORIES }}"
             git push "https://$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          else
+            echo "🔄 无变更需要提交"
           fi
