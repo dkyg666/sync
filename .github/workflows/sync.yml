@@ -2,15 +2,12 @@ name: Sync Upstream Releases
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时检查一次
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       repositories:
         description: 'AlistGo/alist'
         required: false
-
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   sync-releases:
@@ -23,15 +20,14 @@ jobs:
 
       - name: Setup dependencies
         run: |
-          sudo apt-get install -y jq
-          gh --version || curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+          sudo mkdir -p /usr/share/keyrings/
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt update
           sudo apt install -y gh
-
-      - name: Login to GitHub CLI
-        run: gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Determine repositories
         id: set-repos
@@ -47,9 +43,12 @@ jobs:
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
       - name: Process repositories
+        env:
+          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}  # 专用 Token
         run: |
           mkdir -p sync-history
           echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n' | while read -r repo; do
+            export GH_TOKEN=$GH_TOKEN  # 确保循环内生效
             owner=$(echo "$repo" | cut -d/ -f1)
             repo_name=$(echo "$repo" | cut -d/ -f2)
             history_file="sync-history/${owner}_${repo_name}.txt"
@@ -59,7 +58,7 @@ jobs:
             # 获取最新 release
             response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \  # 使用专用 Token
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/releases/latest")
 
@@ -80,20 +79,24 @@ jobs:
             zip_url=$(echo "$response" | jq -r '.zipball_url')
             wget -q -O "${repo_name}-${tag_name}.zip" "$zip_url"
 
-            # 创建 release
+            # 创建 release（需 GH_TOKEN 有目标仓库权限）
             gh release create "sync/$repo_name/$tag_name" "${repo_name}-${tag_name}.zip" \
               --title "Synced from $repo - $tag_name" \
-              --notes "Automatically synced from upstream repository"
+              --notes "Automatically synced from upstream repository" \
+              --repo dkyg666/sync  # 目标仓库
 
             # 记录同步状态
             echo "$tag_name" > "$history_file"
             rm -f "${repo_name}-${tag_name}.zip"
           done
 
-          # 提交同步记录
+      - name: Commit sync records
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add sync-history
           if git commit -m "Update sync records"; then
-            git push
+            git push "https://$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           fi
