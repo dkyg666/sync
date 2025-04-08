@@ -12,8 +12,8 @@ jobs:
       matrix:
         include:
           # 在此处添加需要同步的仓库对
-          - upstream: 'octocat/Hello-World'   # 上游仓库（格式：owner/repo）
-            target: 'your-org/target-repo'    # 目标仓库（格式：owner/repo）
+          - upstream: 'AlistGo/alist'   # 上游仓库（格式：owner/repo）
+            target: 'dkyg666/sync'    # 目标仓库（格式：owner/repo）
           # - upstream: 'another/upstream-repo'
           #   target: 'your-org/another-target'
 
