@@ -72,11 +72,21 @@ jobs:
             last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
             [[ "$tag_name" == "$last_synced" ]] && continue
 
-            # 下载源码并创建 Release（目标仓库为当前仓库）
+            # 下载源码
             wget -q -O "${repo_name}-${tag_name}.zip" "$(jq -r '.zipball_url' <<< "$response")"
-            gh release create "$tag_name" "${repo_name}-${tag_name}.zip" \
-              --title "Synced from $upstream_repo" \
-              --notes "Automatically synced from upstream"
+
+            # 计算MD5校验和
+            md5_sum=$(md5sum "${repo_name}-${tag_name}.zip" | awk '{ print $1 }')
+
+            # 生成同步时间戳 (UTC时间)
+            sync_time=$(date -u +"%Y-%m-%d-%s")
+
+            # 创建 Release（包含时间戳、仓库名、上游tag和MD5）
+            gh release create "${tag_name}" "${repo_name}-${tag_name}.zip" \
+              --title "${sync_time}: ${repo_name}  tag:${tag_name}" \
+              --notes "${md5_sum} ${repo_name}"
+
+            # 记录同步历史
             echo "$tag_name" > "$history_file"
             rm -f "${repo_name}-${tag_name}.zip"
           done
