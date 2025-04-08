@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq git
+          sudo apt-get install -y curl jq git zip
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
@@ -58,28 +58,43 @@ jobs:
             repo_name=$(cut -d/ -f2 <<< "$upstream_repo")
             history_file="sync-history/${owner}_${repo_name}.txt"
 
-            # 获取上游 Release 信息
-            response=$(curl -sL \
+            # 获取最新 Tag 信息（绕过可能缺失的 Release）
+            tag_response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ github.token }}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/$upstream_repo/releases/latest")
-
-            tag_name=$(jq -r '.tag_name' <<< "$response")
-            [[ "$tag_name" == "null" ]] && continue
+              "https://api.github.com/repos/$upstream_repo/tags")
+            
+            tag_name=$(jq -r '.[0].name' <<< "$tag_response")
+            [[ "$tag_name" == "null" ]] && { echo "无法获取 Tag 信息"; continue; }
 
             # 检查是否已同步
             last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
             [[ "$tag_name" == "$last_synced" ]] && continue
 
-            # 下载源码（优先 Release 的 zipball，失败则克隆 Tag）
-            if ! wget -q -O "${repo_name}-${tag_name}.zip" "$(jq -r '.zipball_url' <<< "$response")"; then
-              echo "使用 Git 克隆标签 $tag_name..."
-              git clone --depth 1 --branch "$tag_name" "https://github.com/$upstream_repo.git" "${repo_name}-${tag_name}-src"
-              pushd "${repo_name}-${tag_name}-src" >/dev/null
-              zip -qr "../${repo_name}-${tag_name}.zip" .
-              popd >/dev/null
-              rm -rf "${repo_name}-${tag_name}-src"
+            # 尝试三种源码获取方式
+            if ! (
+              # 方式1: 从 Release 获取
+              release_response=$(curl -sL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ github.token }}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/$upstream_repo/releases/tags/$tag_name") &&
+              zip_url=$(jq -r '.zipball_url' <<< "$release_response") &&
+              [[ "$zip_url" != "null" ]] &&
+              wget -q -O "${repo_name}-${tag_name}.zip" "$zip_url"
+            ); then
+              # 方式2: 直接构造 Tag 源码包
+              if ! wget -q -O "${repo_name}-${tag_name}.zip" \
+                "https://github.com/$upstream_repo/archive/refs/tags/$tag_name.zip"; then
+                # 方式3: 克隆仓库打包
+                echo "使用 Git 克隆标签 $tag_name..."
+                git clone --depth 1 --branch "$tag_name" "https://github.com/$upstream_repo.git" "${repo_name}-${tag_name}-src"
+                cd "${repo_name}-${tag_name}-src"
+                zip -qr "../${repo_name}-${tag_name}.zip" .
+                cd ..
+                rm -rf "${repo_name}-${tag_name}-src"
+              fi
             fi
 
             # 生成同步元数据
