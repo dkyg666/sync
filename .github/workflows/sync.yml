@@ -60,7 +60,7 @@ jobs:
             workdir=$(mktemp -d)
             trap 'rm -rf "$workdir"' EXIT
 
-            # 第一阶段：尝试从Release获取
+            # 尝试从Release获取
             release_response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ github.token }}" \
@@ -70,12 +70,31 @@ jobs:
             tag_name=$(jq -r '.tag_name' <<< "$release_response")
             zip_url=$(jq -r '.zipball_url' <<< "$release_response")
 
-            # Release有效性检查
+            # 判断来源类型
             if [[ "$tag_name" != "null" && "$zip_url" != "null" ]]; then
               echo "Using Release source: $tag_name"
               source_type="release"
+              download_success=false
+              
+              # 重试下载逻辑（修复语法结构）
+              for i in {1..3}; do
+                if wget -q -O "$workdir/source.zip" "$zip_url"; then
+                  unzip -q "$workdir/source.zip" -d "$workdir/source"
+                  mv "$workdir"/source/*/* "$workdir/source_content"
+                  download_success=true
+                  break
+                else
+                  echo "Release download failed, attempt $i"
+                  sleep 5
+                fi  # 闭合if语句
+              done   # 闭合for循环
+
+              if ! $download_success; then
+                echo "All release download attempts failed"
+                continue
+              fi
             else
-              # 第二阶段：从Tags获取
+              # 回退到Tags
               echo "No valid Release, fallback to Tags"
               tags_response=$(curl -sL \
                 -H "Accept: application/vnd.github+json" \
@@ -86,50 +105,28 @@ jobs:
               tag_name=$(jq -r '.[0].name' <<< "$tags_response")
               [[ "$tag_name" == "null" ]] && continue
               source_type="tag"
-            fi
-
-            # 检查同步状态
-            last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
-            [[ "$tag_name" == "$last_synced" ]] && continue
-
-            # 下载处理逻辑
-            if [[ "$source_type" == "release" ]]; then
-              # Release下载方式
-              for i in {1..3}; do
-                if wget -q -O "$workdir/source.zip" "$zip_url"; then
-                  unzip -q "$workdir/source.zip" -d "$workdir/source"
-                  mv "$workdir"/source/*/* "$workdir/source_content"
-                  break
-                else
-                  echo "Release download failed, attempt $i"
-                  sleep 5
-                done
-              fi
-            else
-              # Tag下载方式
+              
               git clone --depth 1 --branch "$tag_name" "https://github.com/$upstream_repo.git" "$workdir/source"
               mv "$workdir/source" "$workdir/source_content"
-            fi
+            fi  # 闭合if-else语句
 
-            # 创建压缩包
+            # 打包发布逻辑
             pushd "$workdir/source_content" >/dev/null
             archive_name="${repo_name}-${tag_name//\//-}.zip"
             zip -qr "../$archive_name" .
             popd >/dev/null
 
-            # 生成元数据
+            # 创建Release
             timestamp=$(date -u +"%Y-%m-%d-%s")
             sync_tag="release-${timestamp}"
             md5_sum=$(md5sum "$workdir/$archive_name" | awk '{ print $1 }')
 
-            # 创建Release
             gh release create "$sync_tag" "$workdir/$archive_name" \
               --title "${timestamp}: ${repo_name} (${tag_name})" \
               --notes "MD5: ${md5_sum}\nRepo: ${upstream_repo}\nSource: ${source_type}\nTag: ${tag_name}"
 
-            # 更新同步记录
             echo "$tag_name" > "$history_file"
-          done
+          done  # 闭合while循环
 
       - name: Commit sync history
         env:
