@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       repositories:
-        description: 'Repository list to sync (format: owner/repo, comma-separated)'
+        description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
         required: true
         default: 'AlistGo/alist,immortalwrt/immortalwrt'
 
@@ -27,8 +27,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq git unzip
+          sudo apt-get install -y curl jq git
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt update
           sudo apt install -y gh
@@ -53,109 +54,47 @@ jobs:
           mkdir -p sync-history
 
           echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n' | while read -r upstream_repo; do
-            # 初始化环境变量
             owner=$(cut -d/ -f1 <<< "$upstream_repo")
             repo_name=$(cut -d/ -f2 <<< "$upstream_repo")
             history_file="sync-history/${owner}_${repo_name}.txt"
-            workdir=$(mktemp -d)
-            trap 'rm -rf "$workdir"' EXIT
 
-            # 第一阶段：尝试从Release获取
-            release_response=$(curl -sL \
+            # 获取上游 Release 信息
+            response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ github.token }}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$upstream_repo/releases/latest")
 
-            tag_name=$(jq -r '.tag_name' <<< "$release_response")
-            zip_url=$(jq -r '.zipball_url' <<< "$release_response")
+            tag_name=$(jq -r '.tag_name' <<< "$response")
+            [[ "$tag_name" == "null" ]] && continue
 
-            if [[ "$tag_name" != "null" && "$zip_url" != "null" ]]; then
-              echo "🔄 Processing Release: $tag_name"
-              source_type="release"
-              download_success=false
-              
-              # 带重试机制的下载流程
-              for i in {1..3}; do
-                if wget -q -O "$workdir/source.zip" "$zip_url"; then
-                  # 解压并处理目录结构
-                  mkdir -p "$workdir/source"
-                  if ! unzip -q "$workdir/source.zip" -d "$workdir/source"; then
-                    echo "❌ Unzip failed, attempt $i"
-                    continue
-                  fi
+            # 检查是否已同步
+            last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
+            [[ "$tag_name" == "$last_synced" ]] && continue
 
-                  # 动态获取解压目录
-                  extracted_dir=$(find "$workdir/source" -mindepth 1 -maxdepth 1 -type d -print -quit)
-                  if [ -n "$extracted_dir" ]; then
-                    mkdir -p "$workdir/source_content"
-                    mv "$extracted_dir"/* "$workdir/source_content/" 2>/dev/null || true
-                    download_success=true
-                    break
-                  else
-                    echo "⚠️  Empty zip structure, attempt $i"
-                  fi
-                else
-                  echo "❌ Download failed, attempt $i"
-                  sleep 5
-                fi
-              done
-
-              if ! $download_success; then
-                echo "⏩ Skipping due to download failures"
-                continue
-              fi
-            else
-              # 第二阶段：回退到Tags
-              echo "🔄 Fallback to Git Tags"
-              tags_response=$(curl -sL \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer ${{ github.token }}" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "https://api.github.com/repos/$upstream_repo/tags")
-
-              tag_name=$(jq -r '.[0].name' <<< "$tags_response")
-              if [[ "$tag_name" == "null" ]]; then
-                echo "⚠️  No valid tags found"
-                continue
-              fi
-              source_type="tag"
-
-              # 克隆仓库并准备内容
-              if ! git clone --depth 1 --branch "$tag_name" "https://github.com/$upstream_repo.git" "$workdir/source"; then
-                echo "❌ Git clone failed"
-                continue
-              fi
-              
-              mkdir -p "$workdir/source_content"
-              mv "$workdir/source"/* "$workdir/source_content/" 2>/dev/null || true
+            # 下载源码（优先 Release 的 zipball，失败则克隆 Tag）
+            if ! wget -q -O "${repo_name}-${tag_name}.zip" "$(jq -r '.zipball_url' <<< "$response")"; then
+              echo "使用 Git 克隆标签 $tag_name..."
+              git clone --depth 1 --branch "$tag_name" "https://github.com/$upstream_repo.git" "${repo_name}-${tag_name}-src"
+              pushd "${repo_name}-${tag_name}-src" >/dev/null
+              zip -qr "../${repo_name}-${tag_name}.zip" .
+              popd >/dev/null
+              rm -rf "${repo_name}-${tag_name}-src"
             fi
 
-            # 验证内容目录
-            if [ ! -d "$workdir/source_content" ] || [ -z "$(ls -A "$workdir/source_content")" ]; then
-              echo "❌ Empty source content"
-              continue
-            fi
-
-            # 打包发布
-            pushd "$workdir/source_content" >/dev/null
-            archive_name="${repo_name}-${tag_name//\//-}.zip"
-            zip -qr "../$archive_name" .
-            popd >/dev/null
-
-            # 创建Release
+            # 生成同步元数据
             timestamp=$(date -u +"%Y-%m-%d-%s")
             sync_tag="release-${timestamp}"
-            md5_sum=$(md5sum "$workdir/$archive_name" | awk '{ print $1 }')
+            md5_sum=$(md5sum "${repo_name}-${tag_name}.zip" | awk '{ print $1 }')
 
-            echo "🚀 Creating release: $sync_tag"
-            gh release create "$sync_tag" "$workdir/$archive_name" \
+            # 创建 Release
+            gh release create "$sync_tag" "${repo_name}-${tag_name}.zip" \
               --title "${timestamp}: ${repo_name} (${tag_name})" \
-              --notes $"MD5: ${md5_sum}\nSource: ${source_type}\nUpstream: ${upstream_repo}"
+              --notes "MD5: ${md5_sum}\nRepo: ${upstream_repo}\nSource Tag: ${tag_name}"
 
-            # 更新同步记录
+            # 记录同步历史
             echo "$tag_name" > "$history_file"
-            echo "✅ Synced $upstream_repo@$tag_name"
+            rm -f "${repo_name}-${tag_name}.zip"
           done
 
       - name: Commit sync history
@@ -165,5 +104,5 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add sync-history
-          git commit -m "chore: Update sync records" || echo "No changes to commit"
+          git commit -m "Update sync records" || exit 0
           git push
