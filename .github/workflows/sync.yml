@@ -83,7 +83,7 @@ jobs:
             # 创建 Release（包含自定义标签）
             gh release create "$sync_tag" "${repo_name}-${tag_name}.zip" \
               --title "${timestamp}: ${repo_name} (${tag_name})" \
-              --notes "MD5: ${md5_sum}\nSource Tag: ${tag_name}\nRepo: ${repo_name}"
+              --notes "MD5: ${md5_sum}\nSource Tag: ${tag_name}\nRepo: ${upstream_repo}"
 
             # 记录同步历史
             echo "$tag_name" > "$history_file"
