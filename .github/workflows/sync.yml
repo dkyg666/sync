@@ -2,7 +2,7 @@ name: Sync Upstream Releases
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时运行一次
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       repositories:
@@ -13,9 +13,9 @@ jobs:
   sync-releases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 允许创建 Release
+      contents: write
     env:
-      TARGET_REPO: "${{ github.repository }}"  # ✅ 关键修改：目标仓库设为当前仓库
+      TARGET_REPO: "${{ github.repository }}"
 
     steps:
       - name: Checkout repository
@@ -27,7 +27,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl jq
-          # 安装 gh CLI
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
@@ -42,13 +41,13 @@ jobs:
           elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
             REPOSITORIES="${{ vars.UPSTREAM_REPOSITORIES }}"
           else
-            REPOSITORIES="AlistGo/alist"  # 默认同步仓库
+            REPOSITORIES="AlistGo/alist"
           fi
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
       - name: Process repositories
         env:
-          GH_TOKEN: ${{ github.token }}  # ✅ 使用默认 Token
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p sync-history
@@ -75,16 +74,15 @@ jobs:
             # 下载源码
             wget -q -O "${repo_name}-${tag_name}.zip" "$(jq -r '.zipball_url' <<< "$response")"
 
-            # 计算MD5校验和
+            # 生成同步元数据
+            timestamp=$(date -u +"%Y-%m-%d-%s")       # 格式: 2025-03-28-14131773196
+            sync_tag="release-${timestamp}"           # 标签格式: release-2025-03-28-14131773196
             md5_sum=$(md5sum "${repo_name}-${tag_name}.zip" | awk '{ print $1 }')
 
-            # 生成同步时间戳 (UTC时间)
-            sync_time=$(date -u +"%Y-%m-%d-%s")
-
-            # 创建 Release（包含时间戳、仓库名、上游tag和MD5）
-            gh release create "${tag_name}" "${repo_name}-${tag_name}.zip" \
-              --title "${sync_time}: ${repo_name}  tag:${tag_name}" \
-              --notes "${md5_sum} ${repo_name}"
+            # 创建 Release（包含自定义标签）
+            gh release create "$sync_tag" "${repo_name}-${tag_name}.zip" \
+              --title "${timestamp}: ${repo_name}" \
+              --notes "MD5: ${md5_sum}\nSource Tag: ${tag_name}\nRepo: ${repo_name}"
 
             # 记录同步历史
             echo "$tag_name" > "$history_file"
