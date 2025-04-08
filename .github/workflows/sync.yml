@@ -1,36 +1,60 @@
-# This is a basic workflow to help you get started with Actions
+name: Sync Upstream Releases
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  schedule:
+    - cron: '0 * * * *'  # 每小时运行一次
+  workflow_dispatch:     # 允许手动触发
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  sync-releases:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # 在此处添加需要同步的仓库对
+          - upstream: 'octocat/Hello-World'   # 上游仓库（格式：owner/repo）
+            target: 'your-org/target-repo'    # 目标仓库（格式：owner/repo）
+          # - upstream: 'another/upstream-repo'
+          #   target: 'your-org/another-target'
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Install dependencies
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          sudo apt-get install -y curl jq
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install -y gh
+
+      - name: Get latest upstream release
+        id: get-upstream
+        run: |
+          response=$(gh api "/repos/${{ matrix.upstream }}/releases/latest")
+          tag=$(echo "$response" | jq -r '.tag_name')
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
+      - name: Check existing release
+        id: check-release
+        run: |
+          exists=$(gh release view ${{ steps.get-upstream.outputs.tag }} --repo ${{ matrix.target }} >/dev/null 2>&1; echo $?)
+          if [ $exists -eq 0 ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download source code
+        if: steps.check-release.outputs.exists == 'false'
+        run: |
+          wget "https://github.com/${{ matrix.upstream }}/archive/refs/tags/${{ steps.get-upstream.outputs.tag }}.tar.gz" -O source.tar.gz
+
+      - name: Create new release
+        if: steps.check-release.outputs.exists == 'false'
+        run: |
+          gh release create ${{ steps.get-upstream.outputs.tag }} \
+            --title "${{ steps.get-upstream.outputs.tag }}" \
+            --notes "Automatically synced from ${{ matrix.upstream }}" \
+            source.tar.gz \
+            --repo ${{ matrix.target }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}  # 需要目标仓库的写入权限
