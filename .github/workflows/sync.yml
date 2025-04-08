@@ -13,12 +13,12 @@ jobs:
   sync-releases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 允许提交代码
+      contents: write
     env:
-      TARGET_REPO: "dkyg666/sync"  # 目标仓库
+      TARGET_REPO: "dkyg666/sync"  # ✅ 在 job 层级明确定义环境变量
 
     steps:
-      # 步骤1: 检出当前仓库
+      # 步骤1: 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -37,26 +37,26 @@ jobs:
           sudo apt update
           sudo apt install -y gh
 
-      # 步骤3: 确定同步仓库列表
+      # 步骤3: 确定仓库列表
       - name: Determine repositories
         id: set-repos
         run: |
-          # 优先级: 手动输入 > 环境变量 > 默认值
           if [ -n "${{ github.event.inputs.repositories }}" ]; then
             REPOSITORIES="${{ github.event.inputs.repositories }}"
           elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
             REPOSITORIES="${{ vars.UPSTREAM_REPOSITORIES }}"
           else
-            REPOSITORIES="AlistGo/alist"  # 默认同步仓库
+            REPOSITORIES="AlistGo/alist"  # 默认仓库
           fi
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
-      # 步骤4: 执行同步操作
+      # 步骤4: 执行同步
       - name: Process repositories
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}  # 需目标仓库写入权限的Token
+          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}  # 目标仓库专用 Token
         run: |
-          set -euo pipefail  # 启用严格错误检查
+          set -euo pipefail  # 启用严格模式
+          echo "::group::同步日志"  # 折叠日志
 
           mkdir -p sync-history
           echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n' | while read -r upstream_repo; do
@@ -67,7 +67,7 @@ jobs:
 
             echo "🔍 检查仓库: $upstream_repo"
 
-            # 获取最新Release信息 (单行curl命令避免换行问题)
+            # 获取最新 Release 信息
             response=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -76,11 +76,11 @@ jobs:
 
             tag_name=$(jq -r '.tag_name' <<< "$response")
             if [[ "$tag_name" == "null" || -z "$tag_name" ]]; then
-              echo "⚠️ 未找到有效Release: $upstream_repo"
+              echo "⚠️ 未找到有效 Release: $upstream_repo"
               continue
             fi
 
-            # 检查是否已同步
+            # 检查同步状态
             last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
             if [[ "$tag_name" == "$last_synced" ]]; then
               echo "✅ 已同步最新版本: $tag_name"
@@ -93,29 +93,29 @@ jobs:
             zip_url=$(jq -r '.zipball_url' <<< "$response")
             wget -q -O "${repo_name}-${tag_name}.zip" "$zip_url"
 
-            # 创建Release (显式传递Token)
-            echo "⬆️ 上传到目标仓库: $env:TARGET_REPO"
+            # 创建 Release (关键修复点: 正确引用 TARGET_REPO)
+            echo "⬆️ 上传到目标仓库: $TARGET_REPO"  # ✅ 直接使用变量名
             gh release create "sync/$repo_name/$tag_name" \
               "${repo_name}-${tag_name}.zip" \
               --title "Synced from $upstream_repo - $tag_name" \
               --notes "Automatically synced from upstream" \
-              --repo "$env:TARGET_REPO" \
-              <<< "$GH_TOKEN"  # 避免交互提示
+              --repo "$TARGET_REPO"  # ✅ 正确引用环境变量
 
             # 记录同步状态
             echo "$tag_name" > "$history_file"
             rm -f "${repo_name}-${tag_name}.zip"
           done
 
-      # 步骤5: 提交同步记录
+          echo "::endgroup::"
+
+      # 步骤5: 提交记录
       - name: Commit sync history
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 当前仓库的Token
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # 仅当有变更时提交
           if git add sync-history && [ -n "$(git status --porcelain)" ]; then
             git commit -m "📚 更新同步记录: ${{ steps.set-repos.outputs.REPOSITORIES }}"
             git push "https://$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
