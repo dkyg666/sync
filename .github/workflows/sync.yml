@@ -42,7 +42,7 @@ jobs:
           elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
             REPOSITORIES="${{ vars.UPSTREAM_REPOSITORIES }}"
           else
-            REPOSITORIES="AlistGo/alist"
+            REPOSITORIES="AlistGo/alist,AlistGo/alist-web,MHSanaei/3x-ui,immortalwrt/immortalwrt,openwrt/openwrt"
           fi
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
