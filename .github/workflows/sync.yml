@@ -8,7 +8,7 @@ on:
       repositories:
         description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
         required: true
-        default: 'AlistGo/alist,AlistGo/alist-web,MHSanaei/3x-ui,immortalwrt/immortalwrt,openwrt/openwrt'
+        default: 'MHSanaei/3x-ui,immortalwrt/immortalwrt,openwrt/openwrt'
 
 jobs:
   sync-releases:
@@ -42,7 +42,7 @@ jobs:
           elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
             REPOSITORIES="${{ vars.UPSTREAM_REPOSITORIES }}"
           else
-            REPOSITORIES="AlistGo/alist,AlistGo/alist-web,MHSanaei/3x-ui,immortalwrt/immortalwrt,openwrt/openwrt"
+            REPOSITORIES="MHSanaei/3x-ui,immortalwrt/immortalwrt,openwrt/openwrt"
           fi
           echo "REPOSITORIES=${REPOSITORIES}" >> $GITHUB_OUTPUT
 
